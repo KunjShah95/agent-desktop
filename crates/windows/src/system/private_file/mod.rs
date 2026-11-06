@@ -106,15 +106,14 @@ impl PrivateFileOps for WindowsPrivateFile {
     }
 
     fn owns_directory(&self, path: &Path) -> std::io::Result<bool> {
-        match path::open_directory_for_owner(path) {
-            Ok(directory) => {
-                match owner::require_actual_owner_by_eligible_principal(&directory, "state root") {
-                    Ok(()) => Ok(true),
-                    Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(false),
-                    Err(error) => Err(error),
-                }
-            }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+        let chain = match path::open_existing_directory_chain(path) {
+            Ok(chain) => chain,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(true),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match owner::require_actual_owner_by_eligible_principal(chain.leaf(), "state root") {
+            Ok(()) => Ok(true),
             Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(false),
             Err(error) => Err(error),
         }

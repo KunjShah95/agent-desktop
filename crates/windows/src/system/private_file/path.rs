@@ -152,14 +152,55 @@ pub(super) fn open_directory_no_follow(path: &Path, access: u32) -> std::io::Res
         .open(path)
 }
 
-/// Opens an existing directory for an ownership read, without following a
-/// reparse point. A junction or symlink is refused before its owner is read:
-/// the owner of the link target is not evidence about the path the caller
-/// named.
-pub(super) fn open_directory_for_owner(path: &Path) -> std::io::Result<File> {
-    let directory = open_directory_no_follow(path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
-    require_verified_directory(&directory)?;
-    Ok(directory)
+/// An existing directory chain opened without following any reparse point.
+///
+/// Every handle is held with a share mode that excludes delete, so no
+/// component can be renamed or replaced while the leaf's owner is read. The
+/// leaf is returned separately; the ancestors stay alive in this value for the
+/// same reason.
+pub(super) struct ExistingDirectoryChain {
+    _ancestors: Vec<File>,
+    leaf: File,
+}
+
+impl ExistingDirectoryChain {
+    pub(super) fn leaf(&self) -> &File {
+        &self.leaf
+    }
+}
+
+/// Opens every component of an existing directory path without following a
+/// reparse point, from the volume root down to the leaf.
+pub(super) fn open_existing_directory_chain(
+    path: &Path,
+) -> std::io::Result<ExistingDirectoryChain> {
+    let mut current = PathBuf::new();
+    let mut handles = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                return Err(invalid_input(
+                    "private file parent must not contain parent traversal",
+                ));
+            }
+            Component::Prefix(prefix) => {
+                current.push(prefix.as_os_str());
+                continue;
+            }
+            Component::RootDir | Component::Normal(_) => current.push(component.as_os_str()),
+        }
+        let directory = open_directory_no_follow(&current, DIRECTORY_PIN_ACCESS | READ_CONTROL)?;
+        require_verified_directory(&directory)?;
+        handles.push(directory);
+    }
+    let leaf = handles
+        .pop()
+        .ok_or_else(|| invalid_input("state root path has no directory component"))?;
+    Ok(ExistingDirectoryChain {
+        _ancestors: handles,
+        leaf,
+    })
 }
 
 fn require_verified_directory(directory: &File) -> std::io::Result<()> {

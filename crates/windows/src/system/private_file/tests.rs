@@ -105,6 +105,26 @@ fn owns_directory_refuses_a_junction_even_when_its_target_is_owned() {
 }
 
 #[test]
+fn owns_directory_refuses_a_real_leaf_reached_through_a_junction_ancestor() {
+    use super::WindowsPrivateFile;
+    use agent_desktop_core::PrivateFileOps;
+
+    let root = Scratch::new("owns-directory-ancestor-junction");
+    let target = Scratch::new("owns-directory-ancestor-target");
+    let junction = root.path().join("redirect");
+    create_junction(&junction, target.path());
+    let leaf = junction.join("state");
+    std::fs::create_dir(&leaf).expect("a real directory under the junction target");
+
+    assert!(
+        !WindowsPrivateFile::new()
+            .owns_directory(&leaf)
+            .expect("the ancestor chain is readable without following the link"),
+        "a state root reached through a junction ancestor must be refused"
+    );
+}
+
+#[test]
 fn owns_directory_accepts_a_missing_state_root_for_lazy_creation() {
     use super::WindowsPrivateFile;
     use agent_desktop_core::PrivateFileOps;
