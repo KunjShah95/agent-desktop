@@ -231,8 +231,8 @@ fn process_image_table() -> ImageTable {
 }
 
 /// The current wall clock in Windows FILETIME ticks, the same epoch and unit
-/// as `PROCESSENTRY32W` creation times, so a pid generation can be compared to
-/// the snapshot instant.
+/// as the `GetProcessTimes` creation time, so a pid generation can be compared
+/// to the snapshot instant.
 #[cfg(target_os = "windows")]
 fn filetime_ticks_now() -> u64 {
     const WINDOWS_EPOCH_OFFSET_SECONDS: u64 = 11_644_473_600;
@@ -252,44 +252,8 @@ fn filetime_ticks_now() -> u64 {
 /// the whole process table per window fails a test rather than only a
 /// benchmark.
 #[cfg(test)]
-pub(crate) mod inventory_calls {
-    use std::cell::{Cell, RefCell};
-
-    thread_local! {
-        static IMAGE_TABLE_WALKS: Cell<usize> = const { Cell::new(0) };
-        static SINGLE_IMAGE_WALKS: Cell<usize> = const { Cell::new(0) };
-        static SINGLE_IMAGE_PIDS: RefCell<Vec<super::ProcessId>> = const { RefCell::new(Vec::new()) };
-        static IDENTITY_CAPTURES: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub(super) fn record_image_table_walk() {
-        crate::system::fixture::call_counter::record(&IMAGE_TABLE_WALKS);
-    }
-
-    pub(super) fn record_single_image_walk(pid: super::ProcessId) {
-        crate::system::fixture::call_counter::record(&SINGLE_IMAGE_WALKS);
-        SINGLE_IMAGE_PIDS.with(|pids| pids.borrow_mut().push(pid));
-    }
-
-    pub(super) fn record_identity_capture() {
-        crate::system::fixture::call_counter::record(&IDENTITY_CAPTURES);
-    }
-
-    pub(crate) fn take() -> (usize, usize) {
-        (
-            crate::system::fixture::call_counter::take(&IMAGE_TABLE_WALKS),
-            crate::system::fixture::call_counter::take(&SINGLE_IMAGE_WALKS),
-        )
-    }
-
-    pub(crate) fn take_single_image_pids() -> Vec<super::ProcessId> {
-        SINGLE_IMAGE_PIDS.with(|pids| std::mem::take(&mut *pids.borrow_mut()))
-    }
-
-    pub(crate) fn take_identity_captures() -> usize {
-        crate::system::fixture::call_counter::take(&IDENTITY_CAPTURES)
-    }
-}
+#[path = "process_identity_inventory_calls.rs"]
+pub(crate) mod inventory_calls;
 
 #[cfg(target_os = "windows")]
 pub(crate) fn process_is_running(pid: ProcessId) -> bool {

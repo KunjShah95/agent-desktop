@@ -286,8 +286,12 @@ mod windows_only {
             "the fixture process has a generation token"
         );
         assert!(!first.2.is_empty(), "the fixture process has an image name");
-        let (table_walks, _) = process_identity::inventory_calls::take();
+        let (table_walks, single_walks) = process_identity::inventory_calls::take();
         assert_eq!(table_walks, 1, "one shared table serves both reads");
+        assert_eq!(
+            single_walks, 0,
+            "neither read may fall back to a per-pid process-table walk"
+        );
         assert!(
             !process_identity::inventory_calls::take_single_image_pids().contains(&pid),
             "a process present in the table must not be read through a per-pid walk"
