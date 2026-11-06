@@ -262,4 +262,28 @@ mod windows_only {
             "every attempt performs its own walk"
         );
     }
+
+    /// The inventory must read the process image table once per attempt, not
+    /// once per visible window. Before the shared table, every listed window
+    /// ran its own full `Toolhelp32` walk (twice: once for `app`, once for the
+    /// strict re-check), so a desktop with dozens of windows paid dozens of
+    /// full process-table walks per command.
+    #[test]
+    fn a_listing_reads_the_process_table_once_per_attempt_not_once_per_window() {
+        crate::tree::fixture::ensure_test_apartment();
+        let _fixture = crate::tree::fixture::HostedFixture::spawn().expect("a fixture host starts");
+        process_identity::inventory_calls::take();
+
+        let _ = list_windows_live(&WindowFilter::default(), deadline(10_000));
+
+        let (table_walks, per_window_walks) = process_identity::inventory_calls::take();
+        assert!(
+            table_walks <= LISTING_RACE_ATTEMPTS as usize,
+            "one shared table per attempt, got {table_walks}"
+        );
+        assert_eq!(
+            per_window_walks, 0,
+            "a listed window must not run its own process-table walk"
+        );
+    }
 }
