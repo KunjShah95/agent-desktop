@@ -142,6 +142,74 @@ fn an_exited_process_with_its_child_handle_held_is_not_running() {
 /// The recycled-pid case: a well-formed token whose generation does not
 /// match the live process at that pid - the shape a new process reusing
 /// an old HWND's pid trips - must fail closed on both entry points.
+#[cfg(target_os = "windows")]
+fn table_with_image(captured_at_ticks: u64, name: &str, pid: ProcessId) -> ProcessTable {
+    use std::cell::{OnceCell, RefCell};
+    use std::collections::HashMap;
+
+    ProcessTable {
+        images: OnceCell::from(ImageTable {
+            captured_at_ticks,
+            names: HashMap::from([(pid, name.to_string())]),
+        }),
+        identities: RefCell::new(HashMap::new()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_cached_image_is_ignored_when_the_pid_generation_is_newer_than_the_snapshot() {
+    let pid = ProcessId::from(std::process::id());
+    let identity = ProcessIdentity::capture(pid)
+        .expect("the current process is capturable")
+        .expect("the current process has a generation");
+    let table = table_with_image(
+        identity.creation_ticks().saturating_sub(1),
+        "stale.exe",
+        pid,
+    );
+
+    let name = table.image_name(pid).expect("a live image name");
+
+    assert_ne!(
+        name, "stale.exe",
+        "a pid recycled after the snapshot must not keep the predecessor's image"
+    );
+    assert!(!name.is_empty());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_cached_image_is_used_when_the_pid_generation_predates_the_snapshot() {
+    let pid = ProcessId::from(std::process::id());
+    let identity = ProcessIdentity::capture(pid)
+        .expect("the current process is capturable")
+        .expect("the current process has a generation");
+    let table = table_with_image(identity.creation_ticks() + 1, "cached.exe", pid);
+
+    assert_eq!(
+        table.image_name(pid).as_deref(),
+        Some("cached.exe"),
+        "an image captured after the process started is valid for that generation"
+    );
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_failed_identity_capture_is_not_cached() {
+    let table = ProcessTable::new();
+
+    assert!(
+        table.identity(ProcessId::new(u32::MAX)).is_none(),
+        "an unopenable pid has no identity"
+    );
+    assert_eq!(
+        table.cached_identity_count(),
+        0,
+        "a failed capture must be retried rather than cached as a negative fact"
+    );
+}
+
 #[test]
 fn a_generation_mismatched_token_fails_closed() {
     let pid = ProcessId::from(std::process::id());

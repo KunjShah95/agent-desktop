@@ -89,6 +89,10 @@ impl ProcessIdentity {
         )
     }
 
+    fn creation_ticks(self) -> u64 {
+        self.creation_seconds * TICKS_PER_SECOND + self.creation_subtick
+    }
+
     /// Whether this identity still matches the process at `pid` right now.
     pub(crate) fn still_matches(self) -> Result<bool, AdapterError> {
         Ok(Self::capture(self.pid)?.is_some_and(|current| current == self))
@@ -105,12 +109,22 @@ pub(crate) fn token_for_pid(pid: ProcessId) -> Result<Option<String>, AdapterErr
 /// window, so a desktop with `n` windows paid `n` full `Toolhelp32` walks. This
 /// table walks it at most once per listing, and caches the per-pid generation
 /// token so several windows of the same application share one `OpenProcess`
-/// and `GetProcessTimes` pair. Both caches are read-only evidence: the
-/// two-sided ownership re-check still reads the live process at the point of
-/// use, so a recycled pid cannot pass on a cached token alone.
+/// and `GetProcessTimes` pair.
+///
+/// The image cache is generation-checked before it is trusted. A pid can be
+/// recycled between the snapshot and the lookup, so a cached name is returned
+/// only when the process's creation time is no later than the snapshot's;
+/// otherwise the name is read live. A failed identity capture is never cached,
+/// and the strict identity re-check still reads the live process, so a
+/// recycled pid cannot pass on cached evidence alone.
 pub(crate) struct ProcessTable {
-    images: OnceCell<HashMap<ProcessId, String>>,
-    identities: RefCell<HashMap<ProcessId, Option<ProcessIdentity>>>,
+    images: OnceCell<ImageTable>,
+    identities: RefCell<HashMap<ProcessId, ProcessIdentity>>,
+}
+
+struct ImageTable {
+    captured_at_ticks: u64,
+    names: HashMap<ProcessId, String>,
 }
 
 impl ProcessTable {
@@ -123,11 +137,11 @@ impl ProcessTable {
 
     pub(crate) fn identity(&self, pid: ProcessId) -> Option<ProcessIdentity> {
         if let Some(cached) = self.identities.borrow().get(&pid).copied() {
-            return cached;
+            return Some(cached);
         }
-        let captured = ProcessIdentity::capture(pid).ok().flatten();
+        let captured = ProcessIdentity::capture(pid).ok().flatten()?;
         self.identities.borrow_mut().insert(pid, captured);
-        captured
+        Some(captured)
     }
 
     pub(crate) fn token(&self, pid: ProcessId) -> Option<String> {
@@ -135,11 +149,22 @@ impl ProcessTable {
     }
 
     pub(crate) fn image_name(&self, pid: ProcessId) -> Option<String> {
-        match self.images.get_or_init(process_image_table).get(&pid) {
-            Some(name) => Some(name.clone()),
+        let table = self.images.get_or_init(process_image_table);
+        let Some(cached) = table.names.get(&pid) else {
             // A process that started after the table was captured is not in
             // it; read that pid directly rather than reporting an empty app.
-            None => process_image_name(pid),
+            return process_image_name(pid);
+        };
+        match self.identity(pid) {
+            // The process was alive when the snapshot was taken, so the cached
+            // name belongs to the same pid generation.
+            Some(identity) if identity.creation_ticks() <= table.captured_at_ticks => {
+                Some(cached.clone())
+            }
+            // The pid was recycled after the snapshot, or its creation time is
+            // unreadable; read the live name instead of attributing the
+            // predecessor's image to it.
+            _ => process_image_name(pid),
         }
     }
 
@@ -148,11 +173,16 @@ impl ProcessTable {
     pub(crate) fn facts(&self, pid: ProcessId) -> (Option<String>, String) {
         (self.token(pid), self.image_name(pid).unwrap_or_default())
     }
+
+    #[cfg(test)]
+    pub(crate) fn cached_identity_count(&self) -> usize {
+        self.identities.borrow().len()
+    }
 }
 
 /// Every process image name the table can see, in one walk.
 #[cfg(target_os = "windows")]
-fn process_image_table() -> HashMap<ProcessId, String> {
+fn process_image_table() -> ImageTable {
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -162,18 +192,22 @@ fn process_image_table() -> HashMap<ProcessId, String> {
     #[cfg(test)]
     inventory_calls::record_image_table_walk();
 
+    let captured_at_ticks = filetime_ticks_now();
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
-        return HashMap::new();
+        return ImageTable {
+            captured_at_ticks,
+            names: HashMap::new(),
+        };
     }
-    let mut images = HashMap::new();
+    let mut names = HashMap::new();
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
     let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) };
     while ok != 0 {
-        images.insert(
+        names.insert(
             ProcessId::from(entry.th32ProcessID),
             wide_buffer_to_string(&entry.szExeFile),
         );
@@ -182,12 +216,36 @@ fn process_image_table() -> HashMap<ProcessId, String> {
     unsafe {
         windows_sys::Win32::Foundation::CloseHandle(snapshot);
     }
-    images
+    ImageTable {
+        captured_at_ticks,
+        names,
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn process_image_table() -> HashMap<ProcessId, String> {
-    HashMap::new()
+fn process_image_table() -> ImageTable {
+    ImageTable {
+        captured_at_ticks: 0,
+        names: HashMap::new(),
+    }
+}
+
+/// The current wall clock in Windows FILETIME ticks, the same epoch and unit
+/// as `PROCESSENTRY32W` creation times, so a pid generation can be compared to
+/// the snapshot instant.
+#[cfg(target_os = "windows")]
+fn filetime_ticks_now() -> u64 {
+    const WINDOWS_EPOCH_OFFSET_SECONDS: u64 = 11_644_473_600;
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (since_epoch.as_secs() + WINDOWS_EPOCH_OFFSET_SECONDS) * TICKS_PER_SECOND
+        + u64::from(since_epoch.subsec_nanos() / 100)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn filetime_ticks_now() -> u64 {
+    0
 }
 
 /// Test-visible counts for the two process reads, so a regression that walks
@@ -195,11 +253,12 @@ fn process_image_table() -> HashMap<ProcessId, String> {
 /// benchmark.
 #[cfg(test)]
 pub(crate) mod inventory_calls {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static IMAGE_TABLE_WALKS: Cell<usize> = const { Cell::new(0) };
         static SINGLE_IMAGE_WALKS: Cell<usize> = const { Cell::new(0) };
+        static SINGLE_IMAGE_PIDS: RefCell<Vec<super::ProcessId>> = const { RefCell::new(Vec::new()) };
         static IDENTITY_CAPTURES: Cell<usize> = const { Cell::new(0) };
     }
 
@@ -207,8 +266,9 @@ pub(crate) mod inventory_calls {
         crate::system::fixture::call_counter::record(&IMAGE_TABLE_WALKS);
     }
 
-    pub(super) fn record_single_image_walk() {
+    pub(super) fn record_single_image_walk(pid: super::ProcessId) {
         crate::system::fixture::call_counter::record(&SINGLE_IMAGE_WALKS);
+        SINGLE_IMAGE_PIDS.with(|pids| pids.borrow_mut().push(pid));
     }
 
     pub(super) fn record_identity_capture() {
@@ -220,6 +280,10 @@ pub(crate) mod inventory_calls {
             crate::system::fixture::call_counter::take(&IMAGE_TABLE_WALKS),
             crate::system::fixture::call_counter::take(&SINGLE_IMAGE_WALKS),
         )
+    }
+
+    pub(crate) fn take_single_image_pids() -> Vec<super::ProcessId> {
+        SINGLE_IMAGE_PIDS.with(|pids| std::mem::take(&mut *pids.borrow_mut()))
     }
 
     pub(crate) fn take_identity_captures() -> usize {
@@ -302,7 +366,7 @@ pub(crate) fn process_image_name(pid: ProcessId) -> Option<String> {
     };
 
     #[cfg(test)]
-    inventory_calls::record_single_image_walk();
+    inventory_calls::record_single_image_walk(pid);
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
@@ -343,22 +407,6 @@ pub(crate) fn matches_instance(pid: ProcessId, token: &str) -> Result<bool, Adap
         None => return Ok(false),
     };
     expected.still_matches()
-}
-
-/// [`matches_instance`] against an already-captured process table, so a
-/// window listing does not re-open the same process for every window.
-pub(crate) fn matches_instance_in(
-    pid: ProcessId,
-    token: &str,
-    table: &ProcessTable,
-) -> Result<bool, AdapterError> {
-    let expected = match parse_token(pid, token)? {
-        Some(identity) => identity,
-        None => return Ok(false),
-    };
-    Ok(table
-        .identity(pid)
-        .is_some_and(|current| current == expected))
 }
 
 /// Parses a token back into a comparable identity, or `None` for an
