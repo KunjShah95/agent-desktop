@@ -78,6 +78,8 @@ fn trace_redaction_covers_credential_storage_names() {
         "account": { "user": "me", "passwd": "secret" },
         "access_token": "secret",
         "refreshToken": "secret",
+        "accessTokens": "secret",
+        "jwt": "secret",
         "monkey": "not a credential",
         "hotkey": "Control+C"
     }));
@@ -88,6 +90,8 @@ fn trace_redaction_covers_credential_storage_names() {
     assert_eq!(value["account"]["passwd"]["redacted"], true);
     assert_eq!(value["access_token"]["redacted"], true);
     assert_eq!(value["refreshToken"]["redacted"], true);
+    assert_eq!(value["accessTokens"]["redacted"], true);
+    assert_eq!(value["jwt"]["redacted"], true);
     assert_eq!(value["monkey"], "not a credential");
     assert_eq!(value["hotkey"], "Control+C");
 }

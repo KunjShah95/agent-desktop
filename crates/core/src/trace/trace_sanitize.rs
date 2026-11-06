@@ -35,6 +35,7 @@ fn is_sensitive_trace_key(key: &str) -> bool {
         "selector",
         "secret",
         "token",
+        "tokens",
         "password",
         "title",
         "url",
@@ -65,6 +66,7 @@ fn is_sensitive_trace_key(key: &str) -> bool {
         "authtoken",
         "refreshtoken",
         "cookie",
+        "jwt",
     ];
     let compact: String = key
         .chars()
