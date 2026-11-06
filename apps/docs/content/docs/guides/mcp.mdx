@@ -33,7 +33,17 @@ Each tool is one command, named `desktop_` plus the command with hyphens as unde
 
 A tool's arguments are its command's arguments, with hyphens as underscores: `snapshot --app Finder -i` is `desktop_snapshot` with `{ "app": "Finder", "interactive_only": true }`. Positional arguments use their names too, such as `ref_id` for `click`. A null argument counts as omitted.
 
-The tool list is read from the CLI's own command definitions, so it always matches the installed binary.
+The tool list is read from the CLI's own command definitions, so it always matches the installed binary. Follow the tool's `inputSchema` for JSON types and required fields. For repeatable arguments such as `args` on `desktop_launch`, pass a JSON array. `desktop_type` requires a string in `text`, and `desktop_set_value` requires a string in `value`.
+
+## Expose observation tools only
+
+Add `--read-only` to serve only commands that observe or report metadata:
+
+```bash
+agent-desktop mcp --read-only
+```
+
+The allow-list covers `snapshot`, `find`, `get`, `is`, `list-*`, `wait`, `status`, `version` and the `skills` reads. It excludes every action, text input, clipboard access, launch, window mutation, session mutation, screenshot, trace export and batch, including the variants that take an output path. The list is reviewed in source, so a newly added command is not exposed to a read-only server until it is added there. Read-only prevents mutation, not observation: `desktop_snapshot` and the other readers still see whatever the accessibility tree exposes.
 
 ## Apply global flags once
 
@@ -51,7 +61,7 @@ A tool cannot pass a global flag. Commands that need a session, such as `trace` 
 
 A tool returns the command's JSON envelope as `structuredContent`, and the same JSON as text. `isError` is `true` when the envelope's `ok` is `false`, so read `error.code` and `error.disposition` exactly as you would from the CLI. A `screenshot` without an output path returns its PNG as an image block instead of base64 text.
 
-An unknown argument returns a tool error that names the accepted arguments, and a value of the wrong type returns an error that names the argument, so the model can correct the call.
+An unknown argument returns a tool error that names the accepted arguments. A missing required argument or a value of the wrong type returns `isError: true` with a message naming the argument, before the CLI starts. The server rejects arrays for single-value arguments and rejects non-integer JSON numbers for integer arguments, so a positional argument cannot silently fill another slot.
 
 ## Start with the skills
 
