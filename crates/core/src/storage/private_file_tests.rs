@@ -297,3 +297,45 @@ fn ensure_private_creates_the_nested_parent_chain() {
     );
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_private_parent_rejects_parent_traversal() {
+    let directory = directory("windows-traversal");
+    let sneaky = directory.join("..").join("outside").join("nested");
+
+    let error = crate::storage::private_file_parent::ensure_private(&sneaky)
+        .expect_err("parent traversal must not create a directory outside the requested path");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_private_parent_rejects_a_junction_component() {
+    let root = directory("windows-junction");
+    let target = directory("windows-junction-target");
+    let junction = root.join("redirect");
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("cmd /c mklink /J must spawn");
+    assert!(status.success(), "junction creation must succeed");
+
+    let nested = junction.join("nested");
+    let error = crate::storage::private_file_parent::ensure_private(&nested)
+        .expect_err("a junction on the private parent path must be refused");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        !target.join("nested").exists(),
+        "no directory may be created at the junction target"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(target).unwrap();
+}
