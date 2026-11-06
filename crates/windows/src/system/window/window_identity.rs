@@ -42,7 +42,7 @@ impl<'a> WindowIdentityEvidence<'a> {
         &self,
         table: &process_identity::ProcessTable,
     ) -> Result<(), AdapterError> {
-        if !process_identity::matches_instance_in(self.pid, self.process_instance, table)? {
+        if !process_identity::matches_instance(self.pid, self.process_instance)? {
             return Err(window_identity_mismatch(self.handle));
         }
         if !self.app.is_empty() && table.image_name(self.pid).unwrap_or_default() != self.app {

@@ -263,27 +263,34 @@ mod windows_only {
         );
     }
 
-    /// The inventory must read the process image table once per attempt, not
-    /// once per visible window. Before the shared table, every listed window
-    /// ran its own full `Toolhelp32` walk (twice: once for `app`, once for the
-    /// strict re-check), so a desktop with dozens of windows paid dozens of
-    /// full process-table walks per command.
+    /// One window identity read must use the shared table and must not fall
+    /// back to a full `Toolhelp32` walk for a process that was in it.
     #[test]
-    fn a_listing_reads_the_process_table_once_per_attempt_not_once_per_window() {
-        crate::tree::fixture::ensure_test_apartment();
-        let _fixture = crate::tree::fixture::HostedFixture::spawn().expect("a fixture host starts");
+    fn a_window_identity_read_uses_the_shared_table_without_a_per_window_walk() {
+        crate::tree::fixture::bootstrap();
+        let fixture = crate::tree::fixture::HostedFixture::spawn().expect("a fixture host starts");
+        let pid = ProcessId::from(fixture.process_id());
         process_identity::inventory_calls::take();
+        process_identity::inventory_calls::take_single_image_pids();
+        let table = process_identity::ProcessTable::new();
 
-        let _ = list_windows_live(&WindowFilter::default(), deadline(10_000));
+        let first = process_facts(fixture.handle() as _, &table)
+            .expect("the fixture window has a process identity");
+        let second = process_facts(fixture.handle() as _, &table)
+            .expect("the fixture window still has a process identity");
 
-        let (table_walks, per_window_walks) = process_identity::inventory_calls::take();
+        assert_eq!(first.0, pid);
+        assert_eq!(second.0, pid);
         assert!(
-            table_walks <= LISTING_RACE_ATTEMPTS as usize,
-            "one shared table per attempt, got {table_walks}"
+            first.1.is_some(),
+            "the fixture process has a generation token"
         );
-        assert_eq!(
-            per_window_walks, 0,
-            "a listed window must not run its own process-table walk"
+        assert!(!first.2.is_empty(), "the fixture process has an image name");
+        let (table_walks, _) = process_identity::inventory_calls::take();
+        assert_eq!(table_walks, 1, "one shared table serves both reads");
+        assert!(
+            !process_identity::inventory_calls::take_single_image_pids().contains(&pid),
+            "a process present in the table must not be read through a per-pid walk"
         );
     }
 }
