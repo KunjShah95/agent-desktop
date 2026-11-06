@@ -70,3 +70,52 @@ pub(crate) fn create_junction(link: &Path, target: &Path) {
         "the planted link must surface as a reparse point"
     );
 }
+
+#[test]
+fn owns_directory_accepts_a_directory_created_by_this_token() {
+    use super::WindowsPrivateFile;
+    use agent_desktop_core::PrivateFileOps;
+
+    let root = Scratch::new("owns-directory");
+
+    assert!(
+        WindowsPrivateFile::new()
+            .owns_directory(root.path())
+            .expect("an ordinary private directory is readable"),
+        "the state root must accept a directory this token owns"
+    );
+}
+
+#[test]
+fn owns_directory_refuses_a_junction_even_when_its_target_is_owned() {
+    use super::WindowsPrivateFile;
+    use agent_desktop_core::PrivateFileOps;
+
+    let root = Scratch::new("owns-directory-junction");
+    let target = Scratch::new("owns-directory-junction-target");
+    let junction = root.path().join("redirect");
+    create_junction(&junction, target.path());
+
+    assert!(
+        !WindowsPrivateFile::new()
+            .owns_directory(&junction)
+            .expect("a reparse point is refused, not an I/O failure"),
+        "a junction must never satisfy the state-root ownership check"
+    );
+}
+
+#[test]
+fn owns_directory_accepts_a_missing_state_root_for_lazy_creation() {
+    use super::WindowsPrivateFile;
+    use agent_desktop_core::PrivateFileOps;
+
+    let root = Scratch::new("owns-directory-missing");
+    let missing = root.path().join("not-created-yet");
+
+    assert!(
+        WindowsPrivateFile::new()
+            .owns_directory(&missing)
+            .expect("a missing path is a valid lazy state root"),
+        "the ownership check must not reject a state root that will be created later"
+    );
+}

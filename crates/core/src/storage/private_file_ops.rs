@@ -80,6 +80,19 @@ pub trait PrivateFileOps: Send + Sync {
     fn ensure_private(&self, path: &Path) -> std::io::Result<()> {
         crate::storage::private_file_parent::ensure_private_portable(path)
     }
+
+    /// Whether `path` is a directory a principal this process may use owns.
+    ///
+    /// The portable implementation compares the owning uid on Unix and accepts
+    /// any directory elsewhere; a platform implementation that can establish
+    /// the real owner overrides it. A missing path is accepted because the
+    /// state root is created lazily.
+    fn owns_directory(&self, path: &Path) -> std::io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(crate::storage::state_root::is_owned_by_current_user(
+            &metadata,
+        ))
+    }
 }
 
 struct PortablePrivateFileOps;

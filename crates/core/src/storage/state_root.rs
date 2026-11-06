@@ -11,13 +11,26 @@ const STATE_DIR_NAME: &str = ".agent-desktop";
 pub fn validate_state_root_env() -> Result<(), AppError> {
     let override_active = crate::refs::home_override_active();
     let env_value = std::env::var_os(AGENT_DESKTOP_HOME_ENV).map(PathBuf::from);
-    validate_state_root_env_value(override_active, env_value, is_owned_by_current_user)
+    validate_state_root_env_value(override_active, env_value, path_owned_by_current_user)
+}
+
+/// Asks the installed private-file implementation whether `path` belongs to a
+/// principal this process may use. The implementation owns the platform rule:
+/// Unix compares the owning uid, and Windows compares the directory's owner
+/// against the token's owner-eligible SID set without following a reparse
+/// point. A missing path is accepted because the state root is created lazily.
+fn path_owned_by_current_user(path: &Path) -> bool {
+    match crate::storage::private_file_ops::with_active_ops(|ops| ops.owns_directory(path)) {
+        Ok(owned) => owned,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
 }
 
 fn validate_state_root_env_value(
     override_active: bool,
     env_value: Option<PathBuf>,
-    owned_by_current_user: impl Fn(&std::fs::Metadata) -> bool,
+    owned_by_current_user: impl Fn(&Path) -> bool,
 ) -> Result<(), AppError> {
     if override_active {
         return Ok(());
@@ -36,7 +49,7 @@ pub(crate) fn resolve_configured_state_root() -> Result<PathBuf, AppError> {
         override_active,
         env_value,
         home_fallback,
-        is_owned_by_current_user,
+        path_owned_by_current_user,
     )
 }
 
@@ -44,7 +57,7 @@ fn resolve_state_root(
     override_active: bool,
     env_value: Option<PathBuf>,
     home_fallback: Option<PathBuf>,
-    owned_by_current_user: impl Fn(&std::fs::Metadata) -> bool,
+    owned_by_current_user: impl Fn(&Path) -> bool,
 ) -> Result<PathBuf, AppError> {
     if !override_active && let Some(env_path) = env_value {
         validate_env_root(&env_path, &owned_by_current_user)?;
@@ -57,7 +70,7 @@ fn resolve_state_root(
 
 fn validate_env_root(
     path: &Path,
-    owned_by_current_user: &dyn Fn(&std::fs::Metadata) -> bool,
+    owned_by_current_user: &dyn Fn(&Path) -> bool,
 ) -> Result<(), AppError> {
     if path.as_os_str().is_empty() {
         return Err(AppError::invalid_input_with_suggestion(
@@ -94,7 +107,7 @@ fn validate_env_root(
                     "Remove the file at this path or choose a different AGENT_DESKTOP_HOME.",
                 ));
             }
-            if !owned_by_current_user(&meta) {
+            if !owned_by_current_user(path) {
                 return Err(AppError::invalid_input_with_suggestion(
                     format!(
                         "AGENT_DESKTOP_HOME is owned by a different user: '{}'",
@@ -133,7 +146,7 @@ mod tests {
     use crate::refs::refs_test_support::TempDir;
     use std::fs;
 
-    fn always_owned(_meta: &std::fs::Metadata) -> bool {
+    fn always_owned(_path: &Path) -> bool {
         true
     }
 
@@ -285,10 +298,31 @@ mod tests {
             false,
             Some(dir.path().to_path_buf()),
             Some(PathBuf::from("/home/example-user")),
-            |_meta| false,
+            |_| false,
         )
         .expect_err("owner predicate reports mismatch");
         assert_eq!(err.code(), "INVALID_ARGS");
+    }
+
+    #[test]
+    fn installed_private_file_ops_own_the_ownership_rule() {
+        struct ForeignOwner;
+        impl crate::PrivateFileOps for ForeignOwner {
+            fn owns_directory(&self, _path: &Path) -> std::io::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let dir = TempDir::new();
+        let owned = crate::storage::private_file_ops::with_test_ops_override(
+            std::rc::Rc::new(ForeignOwner),
+            || path_owned_by_current_user(dir.path()),
+        );
+
+        assert!(
+            !owned,
+            "the state root must consult the installed platform ownership rule"
+        );
     }
 
     #[test]

@@ -104,6 +104,21 @@ impl PrivateFileOps for WindowsPrivateFile {
         path::ensure_private_directory_chain(path)?;
         Ok(())
     }
+
+    fn owns_directory(&self, path: &Path) -> std::io::Result<bool> {
+        match path::open_directory_for_owner(path) {
+            Ok(directory) => {
+                match owner::require_actual_owner_by_eligible_principal(&directory, "state root") {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(false),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(true),
+            Err(error) if error.kind() == ErrorKind::PermissionDenied => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// The same bounded, no-follow, owner-checked read the private-file seam

@@ -152,6 +152,16 @@ pub(super) fn open_directory_no_follow(path: &Path, access: u32) -> std::io::Res
         .open(path)
 }
 
+/// Opens an existing directory for an ownership read, without following a
+/// reparse point. A junction or symlink is refused before its owner is read:
+/// the owner of the link target is not evidence about the path the caller
+/// named.
+pub(super) fn open_directory_for_owner(path: &Path) -> std::io::Result<File> {
+    let directory = open_directory_no_follow(path, FILE_READ_ATTRIBUTES | READ_CONTROL)?;
+    require_verified_directory(&directory)?;
+    Ok(directory)
+}
+
 fn require_verified_directory(directory: &File) -> std::io::Result<()> {
     let attributes = handle_attributes(directory)?;
     require_not_reparse_point(attributes, "private file path component is a reparse point")?;
